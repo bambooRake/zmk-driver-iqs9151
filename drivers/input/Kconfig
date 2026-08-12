@@ -77,6 +77,14 @@ config INPUT_IQS9151_REL_JUMP_MAX
       into a full-screen jump (cursor slamming to a corner). Dropping the
       spike is invisible during normal use. 0 disables the guard.
 
+config INPUT_IQS9151_DEBUG_JUMP
+    bool "IQS9151 debug: log suspicious relative frames"
+    default n
+    help
+      Log (at WRN) raw (pre-guard) and emitted relative motion on suspicious
+      frames (large delta or finger-count change), with finger coordinates
+      and flags, to diagnose cursor jumps. Enable only for debugging.
+
 config INPUT_IQS9151_REL_SETTLE_FRAMES
     int "IQS9151 relative settle frames after touch"
     range 0 10

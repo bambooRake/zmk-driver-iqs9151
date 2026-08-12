@@ -2467,6 +2467,13 @@ static void iqs9151_report_frame_events(const struct device *dev,
             return;
         }
 #endif
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_DEBUG_JUMP)
+        if (frame->rel_x > 100 || frame->rel_x < -100 ||
+            frame->rel_y > 100 || frame->rel_y < -100) {
+            LOG_WRN("DBGJUMP emit REL_X/Y=(%d,%d) fc=%u", frame->rel_x, frame->rel_y,
+                    frame->finger_count);
+        }
+#endif
         iqs9151_report_rel_event(dev, INPUT_REL_X, frame->rel_x, false, K_NO_WAIT);
         iqs9151_report_rel_event(dev, INPUT_REL_Y, frame->rel_y, true, K_NO_WAIT);
     }
@@ -2554,6 +2561,17 @@ static void iqs9151_work_cb(struct k_work *work) {
         LOG_ERR("frame read failed (%d)", ret);
         return;
     }
+
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_DEBUG_JUMP)
+    if (frame.rel_x > 100 || frame.rel_x < -100 ||
+        frame.rel_y > 100 || frame.rel_y < -100 ||
+        frame.finger_count != data->prev_frame.finger_count) {
+        LOG_WRN("DBGJUMP raw rel=(%d,%d) fc=%u->%u f1=(%u,%u) prevf1=(%u,%u) tp=0x%04x info=0x%04x",
+                frame.rel_x, frame.rel_y, data->prev_frame.finger_count, frame.finger_count,
+                frame.finger1_x, frame.finger1_y, data->prev_frame.finger1_x,
+                data->prev_frame.finger1_y, frame.trackpad_flags, frame.info_flags);
+    }
+#endif
 
     /*
      * The chip's relative output can carry a large delta on the first
