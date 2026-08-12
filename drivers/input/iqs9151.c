@@ -57,6 +57,24 @@ LOG_MODULE_REGISTER(iqs9151, CONFIG_INPUT_IQS9151_LOG_LEVEL);
 #define CURSOR_INERTIA_STALE_GAP_MS CONFIG_INPUT_IQS9151_CURSOR_INERTIA_STALE_GAP_MS
 #define CURSOR_INERTIA_MIN_SAMPLES CONFIG_INPUT_IQS9151_CURSOR_INERTIA_MIN_SAMPLES
 #define CURSOR_INERTIA_MIN_AVG_SPEED CONFIG_INPUT_IQS9151_CURSOR_INERTIA_MIN_AVG_SPEED
+
+/*
+ * Edge scroll inertia runs in the raw finger-motion domain (like the cursor),
+ * then the decayed velocity is passed through the edge scroll divisor at emit
+ * time so the fling matches the live scroll feel.
+ */
+#define EDGE_INERTIA_INTERVAL_MS 10
+#define EDGE_INERTIA_MAX_DURATION_MS 3000
+#define EDGE_INERTIA_DECAY_NUM SCROLL_INERTIA_DECAY_NUM
+#define EDGE_INERTIA_DECAY_DEN 1000
+#define EDGE_INERTIA_START_THRESHOLD 2
+#define EDGE_INERTIA_MIN_VELOCITY 2
+#define EDGE_INERTIA_EMA_ALPHA 10
+#define EDGE_INERTIA_RECENT_WINDOW_MS 60
+#define EDGE_INERTIA_STALE_GAP_MS 40
+#define EDGE_INERTIA_MIN_SAMPLES 2
+#define EDGE_INERTIA_MIN_AVG_SPEED 3
+
 #define ONE_FINGER_TAP_MAX_MS CONFIG_INPUT_IQS9151_1F_TAP_MAX_MS
 #define TWO_FINGER_TAP_MAX_MS CONFIG_INPUT_IQS9151_2F_TAP_MAX_MS
 #define IQS9151_TAP_REENTRY_WINDOW_MS 30
@@ -239,6 +257,13 @@ struct iqs9151_data {
     uint8_t finger_history_count;
     uint8_t edge_scroll_zone;   /* enum iqs9151_edge_scroll_zone, latched on touchdown */
     int32_t edge_scroll_accum;  /* fractional wheel accumulator */
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE)
+    struct k_work_delayable inertia_edge_work;
+    struct iqs9151_inertia_state inertia_edge;
+    struct iqs9151_motion_history edge_motion_history;
+    uint8_t edge_inertia_zone;  /* zone latched for the inertia fling emit */
+    int32_t edge_inertia_accum; /* fractional wheel accumulator during inertia */
+#endif
 };
 
 #ifdef CONFIG_INPUT_IQS9151_TEST
@@ -533,6 +558,24 @@ static const struct iqs9151_inertia_gate_params iqs9151_cursor_gate_params = {
     .min_samples = CURSOR_INERTIA_MIN_SAMPLES,
     .min_avg_speed = CURSOR_INERTIA_MIN_AVG_SPEED,
 };
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE)
+static const struct iqs9151_inertia_params iqs9151_edge_scroll_params = {
+    .interval_ms = EDGE_INERTIA_INTERVAL_MS,
+    .max_duration_ms = EDGE_INERTIA_MAX_DURATION_MS,
+    .decay_num = EDGE_INERTIA_DECAY_NUM,
+    .decay_den = EDGE_INERTIA_DECAY_DEN,
+    .fp_shift = INERTIA_FP_SHIFT,
+    .start_threshold = EDGE_INERTIA_START_THRESHOLD,
+    .min_velocity = EDGE_INERTIA_MIN_VELOCITY,
+    .ema_alpha = EDGE_INERTIA_EMA_ALPHA,
+};
+static const struct iqs9151_inertia_gate_params iqs9151_edge_scroll_gate_params = {
+    .recent_window_ms = EDGE_INERTIA_RECENT_WINDOW_MS,
+    .stale_gap_ms = EDGE_INERTIA_STALE_GAP_MS,
+    .min_samples = EDGE_INERTIA_MIN_SAMPLES,
+    .min_avg_speed = EDGE_INERTIA_MIN_AVG_SPEED,
+};
+#endif
 
 static int iqs9151_i2c_write(const struct iqs9151_config *cfg, uint16_t reg, const uint8_t *buf, size_t len) {
     uint8_t tx[2 + IQS9151_I2C_CHUNK_SIZE];
@@ -1963,6 +2006,11 @@ static bool iqs9151_handle_show_reset(struct iqs9151_data *data,
     iqs9151_ema_reset(&data->cursor_ema_x_fp, &data->cursor_ema_y_fp);
     iqs9151_motion_history_reset(&data->scroll_motion_history);
     iqs9151_motion_history_reset(&data->cursor_motion_history);
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE)
+    iqs9151_inertia_cancel(&data->inertia_edge, &data->inertia_edge_work);
+    iqs9151_motion_history_reset(&data->edge_motion_history);
+    data->edge_inertia_zone = IQS9151_EDGE_NONE;
+#endif
     memset(&data->prev_frame, 0, sizeof(data->prev_frame));
     return true;
 }
@@ -2183,6 +2231,36 @@ static void iqs9151_update_inertia_ema(struct iqs9151_data *data,
         iqs9151_ema_reset(&data->scroll_ema_x_fp, &data->scroll_ema_y_fp);
         iqs9151_motion_history_reset(&data->scroll_motion_history);
     }
+
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE)
+    /* A new touch interrupts any ongoing edge fling. */
+    if (prev_frame->finger_count == 0U && frame->finger_count != 0U) {
+        iqs9151_inertia_cancel(&data->inertia_edge, &data->inertia_edge_work);
+        iqs9151_motion_history_reset(&data->edge_motion_history);
+        data->edge_inertia_zone = IQS9151_EDGE_NONE;
+    }
+    /* Record raw finger motion (zone axis only) while edge-scrolling. */
+    if (data->edge_scroll_zone == IQS9151_EDGE_VERTICAL) {
+        iqs9151_motion_history_push(&data->edge_motion_history, 0, frame->rel_y, now_ms);
+        data->edge_inertia_zone = IQS9151_EDGE_VERTICAL;
+    } else if (data->edge_scroll_zone == IQS9151_EDGE_HORIZONTAL) {
+        iqs9151_motion_history_push(&data->edge_motion_history, frame->rel_x, 0, now_ms);
+        data->edge_inertia_zone = IQS9151_EDGE_HORIZONTAL;
+    }
+    /* On lift, seed the fling from the just-recorded motion. */
+    if (cursor_released && data->edge_inertia_zone != IQS9151_EDGE_NONE) {
+        if (iqs9151_inertia_seed_from_history(&data->edge_motion_history,
+                                              &iqs9151_edge_scroll_params,
+                                              &iqs9151_edge_scroll_gate_params, now_ms,
+                                              &seed_vx_fp, &seed_vy_fp)) {
+            data->edge_inertia_accum = 0;
+            iqs9151_inertia_start(&data->inertia_edge, &data->inertia_edge_work,
+                                  &iqs9151_edge_scroll_params, seed_vx_fp, seed_vy_fp);
+        }
+        iqs9151_motion_history_reset(&data->edge_motion_history);
+        data->edge_inertia_zone = IQS9151_EDGE_NONE;
+    }
+#endif
 }
 
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_ENABLE)
@@ -2266,6 +2344,56 @@ static void iqs9151_update_edge_scroll(struct iqs9151_data *data,
     data->edge_scroll_zone = (uint8_t)zone;
     data->edge_scroll_accum = 0;
 }
+
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE)
+/*
+ * Fling continuation for edge scroll. The inertia velocity is in raw finger
+ * units; convert it to wheel steps with the same divisor/sign rules as the
+ * live path so the decay feels identical.
+ */
+static void iqs9151_inertia_edge_work_cb(struct k_work *work) {
+    struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+    struct iqs9151_data *data =
+        CONTAINER_OF(dwork, struct iqs9151_data, inertia_edge_work);
+    const struct device *dev = data->dev;
+    int32_t out_x;
+    int32_t out_y;
+
+    const bool active =
+        iqs9151_inertia_step(&data->inertia_edge, &iqs9151_edge_scroll_params, &out_x, &out_y);
+
+    if (out_x > INT16_MAX) {
+        out_x = INT16_MAX;
+    } else if (out_x < INT16_MIN) {
+        out_x = INT16_MIN;
+    }
+    if (out_y > INT16_MAX) {
+        out_y = INT16_MAX;
+    } else if (out_y < INT16_MIN) {
+        out_y = INT16_MIN;
+    }
+
+    if (data->edge_inertia_zone == IQS9151_EDGE_VERTICAL) {
+        int32_t w = iqs9151_edge_scroll_step(&data->edge_inertia_accum, (int16_t)out_y);
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_VERTICAL_INVERT)
+        w = -w;
+#endif
+        if (w != 0) {
+            iqs9151_report_rel_event(dev, INPUT_REL_WHEEL, (int16_t)w, true, K_NO_WAIT);
+        }
+    } else if (data->edge_inertia_zone == IQS9151_EDGE_HORIZONTAL) {
+        int32_t w = iqs9151_edge_scroll_step(&data->edge_inertia_accum, (int16_t)out_x);
+        if (w != 0) {
+            iqs9151_report_rel_event(dev, INPUT_REL_HWHEEL, (int16_t)w, true, K_NO_WAIT);
+        }
+    }
+
+    if (active) {
+        k_work_schedule(&data->inertia_edge_work,
+                        K_MSEC(iqs9151_edge_scroll_params.interval_ms));
+    }
+}
+#endif /* CONFIG_INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE */
 #endif /* CONFIG_INPUT_IQS9151_EDGE_SCROLL_ENABLE */
 
 static void iqs9151_report_frame_events(const struct device *dev,
@@ -2300,6 +2428,9 @@ static void iqs9151_report_frame_events(const struct device *dev,
 
         if (data->edge_scroll_zone == IQS9151_EDGE_VERTICAL) {
             int32_t w = iqs9151_edge_scroll_step(&data->edge_scroll_accum, frame->rel_y);
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_VERTICAL_INVERT)
+            w = -w;
+#endif
             if (w != 0) {
                 iqs9151_report_rel_event(dev, INPUT_REL_WHEEL, (int16_t)w, true, K_NO_WAIT);
             }
@@ -2348,6 +2479,11 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
         iqs9151_ema_reset(&data->cursor_ema_x_fp, &data->cursor_ema_y_fp);
         iqs9151_motion_history_reset(&data->scroll_motion_history);
         iqs9151_motion_history_reset(&data->cursor_motion_history);
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE)
+        iqs9151_inertia_cancel(&data->inertia_edge, &data->inertia_edge_work);
+        iqs9151_motion_history_reset(&data->edge_motion_history);
+        data->edge_inertia_zone = IQS9151_EDGE_NONE;
+#endif
     }
 
     if (data->one_finger.active && data->one_finger.hold_sent) {
@@ -2757,6 +2893,9 @@ static int iqs9151_init(const struct device *dev) {
     k_work_init_delayable(&data->three_finger_click_work, iqs9151_three_finger_click_work_cb);
     k_work_init_delayable(&data->inertia_scroll_work, iqs9151_inertia_scroll_work_cb);
     k_work_init_delayable(&data->inertia_cursor_work, iqs9151_inertia_cursor_work_cb);
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE)
+    k_work_init_delayable(&data->inertia_edge_work, iqs9151_inertia_edge_work_cb);
+#endif
     iqs9151_inertia_state_reset(&data->inertia_scroll);
     iqs9151_inertia_state_reset(&data->inertia_cursor);
     iqs9151_ema_reset(&data->scroll_ema_x_fp, &data->scroll_ema_y_fp);
@@ -2815,6 +2954,9 @@ void iqs9151_test_context_init(void *ctx, const struct device *dev) {
     k_work_init_delayable(&data->three_finger_click_work, iqs9151_three_finger_click_work_cb);
     k_work_init_delayable(&data->inertia_scroll_work, iqs9151_inertia_scroll_work_cb);
     k_work_init_delayable(&data->inertia_cursor_work, iqs9151_inertia_cursor_work_cb);
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE)
+    k_work_init_delayable(&data->inertia_edge_work, iqs9151_inertia_edge_work_cb);
+#endif
     iqs9151_inertia_state_reset(&data->inertia_scroll);
     iqs9151_inertia_state_reset(&data->inertia_cursor);
     iqs9151_ema_reset(&data->scroll_ema_x_fp, &data->scroll_ema_y_fp);
@@ -2843,6 +2985,9 @@ void iqs9151_test_cancel_pending_work(void *ctx) {
     (void)k_work_cancel_delayable(&data->three_finger_click_work);
     (void)k_work_cancel_delayable(&data->inertia_scroll_work);
     (void)k_work_cancel_delayable(&data->inertia_cursor_work);
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE)
+    (void)k_work_cancel_delayable(&data->inertia_edge_work);
+#endif
     (void)k_work_cancel(&data->work);
 }
 

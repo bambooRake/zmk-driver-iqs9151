@@ -398,6 +398,22 @@ config INPUT_IQS9151_EDGE_SCROLL_NATURAL
     help
       Flip wheel direction. Toggle if scrolling feels inverted.
 
+config INPUT_IQS9151_EDGE_SCROLL_VERTICAL_INVERT
+    bool "IQS9151 invert vertical edge scroll only"
+    default n
+    help
+      Flip only the vertical (REL_WHEEL) edge scroll direction, independent
+      of NATURAL. Use when vertical feels inverted but horizontal is correct.
+
+config INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE
+    bool "IQS9151 edge scroll inertia enable"
+    default n
+    help
+      Continue edge scrolling with a decaying fling after the finger lifts,
+      reusing the driver-side inertia engine. Velocity is seeded from the
+      raw finger motion and converted to wheel steps with the edge scroll
+      divisor, so inertia matches the live scroll feel.
+
 endif
 
 config INPUT_IQS9151_TEST
