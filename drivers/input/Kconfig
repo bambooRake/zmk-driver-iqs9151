@@ -77,6 +77,17 @@ config INPUT_IQS9151_REL_JUMP_MAX
       into a full-screen jump (cursor slamming to a corner). Dropping the
       spike is invisible during normal use. 0 disables the guard.
 
+config INPUT_IQS9151_REL_SETTLE_FRAMES
+    int "IQS9151 relative settle frames after touch"
+    range 0 10
+    default 3
+    help
+      Suppress relative (cursor/edge-scroll) motion for this many frames
+      after any finger-count change. The chip can emit a large relative
+      delta on the first frame(s) of a new touch (stale reference from the
+      previous touch), which macOS pointer acceleration turns into a jump
+      to a screen corner. 0 disables.
+
 config INPUT_IQS9151_ATI_TARGETCOUNT
     int "IQS9151 ATI target count"
     range 0 1000

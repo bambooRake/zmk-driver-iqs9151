@@ -257,6 +257,7 @@ struct iqs9151_data {
     uint8_t finger_history_count;
     uint8_t edge_scroll_zone;   /* enum iqs9151_edge_scroll_zone, latched on touchdown */
     int32_t edge_scroll_accum;  /* fractional wheel accumulator */
+    uint8_t rel_settle;         /* frames to suppress relative motion after a finger-count change */
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE)
     struct k_work_delayable inertia_edge_work;
     struct iqs9151_inertia_state inertia_edge;
@@ -2552,6 +2553,23 @@ static void iqs9151_work_cb(struct k_work *work) {
         LOG_ERR("frame read failed (%d)", ret);
         return;
     }
+
+#if CONFIG_INPUT_IQS9151_REL_SETTLE_FRAMES > 0
+    /*
+     * The chip's relative output can carry a large delta on the first frame(s)
+     * of a new touch (stale reference from the previous touch position). Left
+     * raw, macOS pointer acceleration slams the cursor to a corner. Suppress
+     * relative motion for a few frames after any finger-count change.
+     */
+    if (frame.finger_count != data->prev_frame.finger_count) {
+        data->rel_settle = CONFIG_INPUT_IQS9151_REL_SETTLE_FRAMES;
+    }
+    if (data->rel_settle > 0U) {
+        frame.rel_x = 0;
+        frame.rel_y = 0;
+        data->rel_settle--;
+    }
+#endif
 
     iqs9151_process_frame(data, &frame, now_ms);
 }
