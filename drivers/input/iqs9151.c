@@ -1975,6 +1975,26 @@ static void iqs9151_three_finger_click_work_cb(struct k_work *work) {
     }
 }
 
+/*
+ * Reject implausibly large single-frame relative motion. These spikes are
+ * sensor glitches; macOS pointer acceleration turns them into a full-screen
+ * jump (cursor slamming into a corner). Dropping just the relative delta keeps
+ * finger-count / gesture logic intact.
+ */
+static void iqs9151_apply_jump_guard(struct iqs9151_frame *frame) {
+#if CONFIG_INPUT_IQS9151_REL_JUMP_MAX > 0
+    const int32_t max = CONFIG_INPUT_IQS9151_REL_JUMP_MAX;
+    if (frame->rel_x > max || frame->rel_x < -max ||
+        frame->rel_y > max || frame->rel_y < -max) {
+        LOG_WRN("rel jump guard: dropped rel_x=%d rel_y=%d", frame->rel_x, frame->rel_y);
+        frame->rel_x = 0;
+        frame->rel_y = 0;
+    }
+#else
+    ARG_UNUSED(frame);
+#endif
+}
+
 static int iqs9151_read_frame(const struct iqs9151_config *cfg,
                               struct iqs9151_frame *frame) {
     uint8_t raw_frame[IQS9151_FRAME_READ_SIZE];
@@ -1987,6 +2007,7 @@ static int iqs9151_read_frame(const struct iqs9151_config *cfg,
     }
 
     iqs9151_parse_frame(raw_frame, frame);
+    iqs9151_apply_jump_guard(frame);
     return 0;
 }
 

@@ -66,6 +66,17 @@ config INPUT_IQS9151_RESOLUTION_Y
       coordinate scale used by the device configuration.
       Currently not applied by the driver.
 
+config INPUT_IQS9151_REL_JUMP_MAX
+    int "IQS9151 relative jump guard (max per-frame delta)"
+    range 0 32767
+    default 1200
+    help
+      Reject a single frame's relative motion when |rel_x| or |rel_y|
+      exceeds this many units. Such spikes are sensor glitches (touchdown/
+      liftoff transients, re-ATI) that macOS pointer acceleration amplifies
+      into a full-screen jump (cursor slamming to a corner). Dropping the
+      spike is invisible during normal use. 0 disables the guard.
+
 config INPUT_IQS9151_ATI_TARGETCOUNT
     int "IQS9151 ATI target count"
     range 0 1000
