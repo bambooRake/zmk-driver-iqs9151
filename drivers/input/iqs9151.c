@@ -258,6 +258,7 @@ struct iqs9151_data {
     uint8_t edge_scroll_zone;   /* enum iqs9151_edge_scroll_zone, latched on touchdown */
     int32_t edge_scroll_accum;  /* fractional wheel accumulator */
     uint8_t rel_settle;         /* frames to suppress relative motion after a finger-count change */
+    bool rel_drop_first;        /* drop the first non-zero relative sample after a new touch */
 #if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_INERTIA_ENABLE)
     struct k_work_delayable inertia_edge_work;
     struct iqs9151_inertia_state inertia_edge;
@@ -2554,22 +2555,39 @@ static void iqs9151_work_cb(struct k_work *work) {
         return;
     }
 
-#if CONFIG_INPUT_IQS9151_REL_SETTLE_FRAMES > 0
     /*
-     * The chip's relative output can carry a large delta on the first frame(s)
-     * of a new touch (stale reference from the previous touch position). Left
-     * raw, macOS pointer acceleration slams the cursor to a corner. Suppress
-     * relative motion for a few frames after any finger-count change.
+     * The chip's relative output can carry a large delta on the first
+     * movement of a new touch (stale reference from the previous touch
+     * position). Left raw, macOS pointer acceleration slams the cursor to a
+     * corner. Two complementary guards, both keyed off a finger-count change:
+     *   1) zero relative for a few frames right after the change (SETTLE), and
+     *   2) drop the first non-zero relative sample whenever it arrives, since
+     *      the finger may sit still past the settle window before the stale
+     *      delta appears (DROP_FIRST). This costs only the very first motion
+     *      delta of a touch, which is imperceptible.
      */
     if (frame.finger_count != data->prev_frame.finger_count) {
+#if CONFIG_INPUT_IQS9151_REL_SETTLE_FRAMES > 0
         data->rel_settle = CONFIG_INPUT_IQS9151_REL_SETTLE_FRAMES;
+#endif
+        if (frame.finger_count > data->prev_frame.finger_count) {
+            data->rel_drop_first = true;
+        }
     }
+#if CONFIG_INPUT_IQS9151_REL_SETTLE_FRAMES > 0
     if (data->rel_settle > 0U) {
         frame.rel_x = 0;
         frame.rel_y = 0;
         data->rel_settle--;
     }
 #endif
+    if (data->rel_drop_first && (frame.rel_x != 0 || frame.rel_y != 0)) {
+        LOG_WRN("drop first-move rel after touch: rel_x=%d rel_y=%d",
+                frame.rel_x, frame.rel_y);
+        frame.rel_x = 0;
+        frame.rel_y = 0;
+        data->rel_drop_first = false;
+    }
 
     iqs9151_process_frame(data, &frame, now_ms);
 }
