@@ -102,6 +102,11 @@ enum iqs9151_two_finger_mode {
     IQS9151_2F_MODE_SCROLL,
     IQS9151_2F_MODE_PINCH,
 };
+enum iqs9151_edge_scroll_zone {
+    IQS9151_EDGE_NONE = 0,
+    IQS9151_EDGE_VERTICAL,   /* left/right edge -> vertical wheel */
+    IQS9151_EDGE_HORIZONTAL, /* top/bottom edge -> horizontal wheel */
+};
 struct iqs9151_one_finger_state {
     bool active;
     bool hold_sent;
@@ -232,6 +237,8 @@ struct iqs9151_data {
     struct iqs9151_finger_history_entry finger_history[IQS9151_FINGER_HISTORY_SIZE];
     uint8_t finger_history_head;
     uint8_t finger_history_count;
+    uint8_t edge_scroll_zone;   /* enum iqs9151_edge_scroll_zone, latched on touchdown */
+    int32_t edge_scroll_accum;  /* fractional wheel accumulator */
 };
 
 #ifdef CONFIG_INPUT_IQS9151_TEST
@@ -2178,6 +2185,89 @@ static void iqs9151_update_inertia_ema(struct iqs9151_data *data,
     }
 }
 
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_ENABLE)
+/*
+ * Edge scroll: while a single finger stays in a configured edge zone, convert
+ * its relative motion into wheel events instead of cursor motion. The zone is
+ * latched on touchdown (0->1 finger) so moving toward the centre mid-drag does
+ * not flip back to cursor. Which physical edge maps where is fully config
+ * driven so orientation can be corrected without code changes.
+ */
+static int32_t iqs9151_edge_scroll_step(int32_t *accum, int16_t rel) {
+    int32_t div = CONFIG_INPUT_IQS9151_EDGE_SCROLL_DIVISOR;
+    if (div < 1) {
+        div = 1;
+    }
+    *accum += (int32_t)rel;
+    int32_t steps = *accum / div;
+    if (steps != 0) {
+        *accum -= steps * div;
+    }
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_NATURAL)
+    return steps;
+#else
+    return -steps;
+#endif
+}
+
+static void iqs9151_update_edge_scroll(struct iqs9151_data *data,
+                                       const struct iqs9151_frame *frame,
+                                       const struct iqs9151_frame *prev_frame) {
+    /* Only a lone finger can edge-scroll; clear otherwise. */
+    if (frame->finger_count != 1U) {
+        data->edge_scroll_zone = IQS9151_EDGE_NONE;
+        data->edge_scroll_accum = 0;
+        return;
+    }
+    /* Keep the latch for the duration of the touch. */
+    if (prev_frame->finger_count == 1U) {
+        return;
+    }
+
+    uint16_t x = 0U;
+    uint16_t y = 0U;
+    if (!iqs9151_get_finger1_xy(frame, prev_frame, &x, &y)) {
+        data->edge_scroll_zone = IQS9151_EDGE_NONE;
+        data->edge_scroll_accum = 0;
+        return;
+    }
+
+    const uint32_t res_x = CONFIG_INPUT_IQS9151_RESOLUTION_X;
+    const uint32_t res_y = CONFIG_INPUT_IQS9151_RESOLUTION_Y;
+    const uint32_t zone_x = res_x * CONFIG_INPUT_IQS9151_EDGE_SCROLL_ZONE_PCT / 100U;
+    const uint32_t zone_y = res_y * CONFIG_INPUT_IQS9151_EDGE_SCROLL_ZONE_PCT / 100U;
+    enum iqs9151_edge_scroll_zone zone = IQS9151_EDGE_NONE;
+
+    /* Vertical wheel zone on one X edge (priority over horizontal). */
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_VERTICAL_ON_MAX_X)
+    if ((uint32_t)x >= res_x - zone_x) {
+        zone = IQS9151_EDGE_VERTICAL;
+    }
+#else
+    if ((uint32_t)x <= zone_x) {
+        zone = IQS9151_EDGE_VERTICAL;
+    }
+#endif
+
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_BOTTOM_ENABLE)
+    if (zone == IQS9151_EDGE_NONE) {
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_HORIZONTAL_ON_MAX_Y)
+        if ((uint32_t)y >= res_y - zone_y) {
+            zone = IQS9151_EDGE_HORIZONTAL;
+        }
+#else
+        if ((uint32_t)y <= zone_y) {
+            zone = IQS9151_EDGE_HORIZONTAL;
+        }
+#endif
+    }
+#endif
+
+    data->edge_scroll_zone = (uint8_t)zone;
+    data->edge_scroll_accum = 0;
+}
+#endif /* CONFIG_INPUT_IQS9151_EDGE_SCROLL_ENABLE */
+
 static void iqs9151_report_frame_events(const struct device *dev,
                                         const struct iqs9151_frame *frame,
                                         const struct iqs9151_two_finger_result *two_result,
@@ -2205,6 +2295,24 @@ static void iqs9151_report_frame_events(const struct device *dev,
             iqs9151_report_rel_event(dev, INPUT_REL_WHEEL, two_result->scroll_y, true, K_NO_WAIT);
         }
     } else if (frame->finger_count == 1U && cursor_moving && !suppress_cursor_tail) {
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_ENABLE)
+        struct iqs9151_data *data = dev->data;
+
+        if (data->edge_scroll_zone == IQS9151_EDGE_VERTICAL) {
+            int32_t w = iqs9151_edge_scroll_step(&data->edge_scroll_accum, frame->rel_y);
+            if (w != 0) {
+                iqs9151_report_rel_event(dev, INPUT_REL_WHEEL, (int16_t)w, true, K_NO_WAIT);
+            }
+            return;
+        }
+        if (data->edge_scroll_zone == IQS9151_EDGE_HORIZONTAL) {
+            int32_t w = iqs9151_edge_scroll_step(&data->edge_scroll_accum, frame->rel_x);
+            if (w != 0) {
+                iqs9151_report_rel_event(dev, INPUT_REL_HWHEEL, (int16_t)w, true, K_NO_WAIT);
+            }
+            return;
+        }
+#endif
         iqs9151_report_rel_event(dev, INPUT_REL_X, frame->rel_x, false, K_NO_WAIT);
         iqs9151_report_rel_event(dev, INPUT_REL_Y, frame->rel_y, true, K_NO_WAIT);
     }
@@ -2246,6 +2354,15 @@ static void iqs9151_process_frame(struct iqs9151_data *data,
         iqs9151_inertia_cancel(&data->inertia_cursor, &data->inertia_cursor_work);
         iqs9151_motion_history_reset(&data->cursor_motion_history);
     }
+
+#if IS_ENABLED(CONFIG_INPUT_IQS9151_EDGE_SCROLL_ENABLE)
+    iqs9151_update_edge_scroll(data, frame, &prev_frame);
+    if (data->edge_scroll_zone != IQS9151_EDGE_NONE) {
+        /* Avoid a cursor fling when the edge-scroll touch lifts. */
+        iqs9151_inertia_cancel(&data->inertia_cursor, &data->inertia_cursor_work);
+        iqs9151_motion_history_reset(&data->cursor_motion_history);
+    }
+#endif
 
     iqs9151_report_frame_events(dev, frame, &two_result, cursor_moving,
                                 suppress_cursor_tail);

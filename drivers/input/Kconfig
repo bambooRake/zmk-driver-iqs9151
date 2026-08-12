@@ -348,6 +348,58 @@ config INPUT_IQS9151_3F_SWIPE_THRESHOLD
     help
       Three-finger swipe threshold (driver-side).
 
+config INPUT_IQS9151_EDGE_SCROLL_ENABLE
+    bool "IQS9151 edge scroll enable"
+    default n
+    help
+      Convert single-finger motion within a configured edge zone into
+      wheel events (trackball-style edge scrolling). The zone is latched
+      on touchdown for the duration of the touch.
+
+if INPUT_IQS9151_EDGE_SCROLL_ENABLE
+
+config INPUT_IQS9151_EDGE_SCROLL_ZONE_PCT
+    int "IQS9151 edge scroll zone width (percent)"
+    range 1 50
+    default 15
+    help
+      Width of the edge zone as a percentage of the pad resolution.
+
+config INPUT_IQS9151_EDGE_SCROLL_VERTICAL_ON_MAX_X
+    bool "IQS9151 vertical edge scroll on max-X side"
+    default y
+    help
+      y: vertical wheel zone on the high-X edge (physical right on a pad
+      mounted with X increasing to the right). n: low-X edge (left).
+
+config INPUT_IQS9151_EDGE_SCROLL_BOTTOM_ENABLE
+    bool "IQS9151 horizontal edge scroll enable"
+    default y
+    help
+      Enable a horizontal (HWHEEL) scroll zone on a Y edge.
+
+config INPUT_IQS9151_EDGE_SCROLL_HORIZONTAL_ON_MAX_Y
+    bool "IQS9151 horizontal edge scroll on max-Y side"
+    default y
+    help
+      y: horizontal wheel zone on the high-Y edge. n: low-Y edge.
+
+config INPUT_IQS9151_EDGE_SCROLL_DIVISOR
+    int "IQS9151 edge scroll divisor (motion -> wheel)"
+    range 1 100
+    default 10
+    help
+      Accumulated relative motion is divided by this to produce wheel
+      steps; larger is slower. Remainder is carried between frames.
+
+config INPUT_IQS9151_EDGE_SCROLL_NATURAL
+    bool "IQS9151 edge scroll natural direction"
+    default n
+    help
+      Flip wheel direction. Toggle if scrolling feels inverted.
+
+endif
+
 config INPUT_IQS9151_TEST
     bool "IQS9151 test hooks"
     depends on ZTEST
