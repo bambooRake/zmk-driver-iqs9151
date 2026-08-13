@@ -269,6 +269,18 @@ config INPUT_IQS9151_2F_SCROLL_START_MOVE
     help
       Movement threshold to start 2F scroll mode (driver-side).
 
+config INPUT_IQS9151_2F_SCROLL_DIVISOR
+    int "IQS9151 two-finger scroll divisor (speed reduction)"
+    range 1 64
+    default 1
+    help
+      Divide raw two-finger scroll motion by this value before emitting
+      wheel events. The high-resolution pad otherwise emits very large
+      per-frame deltas, making scrolling feel far too fast. Larger = slower
+      (e.g. 12 = 1/12 speed). A fractional remainder is carried between
+      frames so slow scrolls stay smooth, and cursor/scroll inertia seeds
+      from the divided value so the glide feel is preserved. 1 = unchanged.
+
 config INPUT_IQS9151_SCROLL_INERTIA_ENABLE
     bool "IQS9151 scroll inertia enable"
     default y

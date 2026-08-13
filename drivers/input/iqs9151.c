@@ -153,6 +153,8 @@ struct iqs9151_two_finger_state {
     int32_t centroid_last_y;
     int32_t distance_last;
     int32_t pinch_wheel_remainder;
+    int32_t scroll_x_remainder;
+    int32_t scroll_y_remainder;
     enum iqs9151_two_finger_mode mode;
 };
 struct iqs9151_two_finger_result {
@@ -1077,6 +1079,8 @@ static void iqs9151_two_finger_reset(struct iqs9151_two_finger_state *state) {
     state->centroid_last_y = 0;
     state->distance_last = 0;
     state->pinch_wheel_remainder = 0;
+    state->scroll_x_remainder = 0;
+    state->scroll_y_remainder = 0;
     state->mode = IQS9151_2F_MODE_NONE;
 }
 
@@ -1269,6 +1273,8 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
         state->centroid_dy = 0;
         state->distance_delta = 0;
         state->pinch_wheel_remainder = 0;
+        state->scroll_x_remainder = 0;
+        state->scroll_y_remainder = 0;
         state->mode = IQS9151_2F_MODE_NONE;
         if (have_xy) {
             state->centroid_last_x = ((int32_t)f1x + (int32_t)f2x) / 2;
@@ -1352,11 +1358,23 @@ static void iqs9151_two_finger_update(struct iqs9151_data *data,
 
         if (state->mode == IQS9151_2F_MODE_SCROLL) {
             result->scroll_active = true;
+            /* Scale down raw centroid delta by a divisor, carrying the
+             * fractional remainder between frames so slow scrolls stay smooth.
+             * Divisor 1 == unchanged (raw 1:1). The inertia fling seeds from
+             * these already-divided values, so the "ぬるぬる" feel is preserved
+             * proportionally while total travel shrinks. */
+            const int32_t scroll_div = CONFIG_INPUT_IQS9151_2F_SCROLL_DIVISOR;
             if (IS_ENABLED(CONFIG_INPUT_IQS9151_SCROLL_X_ENABLE)) {
-                result->scroll_x = (int16_t)CLAMP(step_x, INT16_MIN, INT16_MAX);
+                const int32_t acc = state->scroll_x_remainder + step_x;
+                const int32_t out = acc / scroll_div;
+                state->scroll_x_remainder = acc - (out * scroll_div);
+                result->scroll_x = (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
             }
             if (IS_ENABLED(CONFIG_INPUT_IQS9151_SCROLL_Y_ENABLE)) {
-                result->scroll_y = (int16_t)CLAMP(step_y, INT16_MIN, INT16_MAX);
+                const int32_t acc = state->scroll_y_remainder + step_y;
+                const int32_t out = acc / scroll_div;
+                state->scroll_y_remainder = acc - (out * scroll_div);
+                result->scroll_y = (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
             }
         } else if (state->mode == IQS9151_2F_MODE_PINCH) {
             const int32_t wheel_div =
@@ -2272,6 +2290,7 @@ static void iqs9151_update_inertia_ema(struct iqs9151_data *data,
     }
     /* On lift, seed the fling from the just-recorded motion. */
     if (cursor_released && data->edge_inertia_zone != IQS9151_EDGE_NONE) {
+        bool fling_started = false;
         if (iqs9151_inertia_seed_from_history(&data->edge_motion_history,
                                               &iqs9151_edge_scroll_params,
                                               &iqs9151_edge_scroll_gate_params, now_ms,
@@ -2279,9 +2298,16 @@ static void iqs9151_update_inertia_ema(struct iqs9151_data *data,
             data->edge_inertia_accum = 0;
             iqs9151_inertia_start(&data->inertia_edge, &data->inertia_edge_work,
                                   &iqs9151_edge_scroll_params, seed_vx_fp, seed_vy_fp);
+            fling_started = true;
         }
         iqs9151_motion_history_reset(&data->edge_motion_history);
-        data->edge_inertia_zone = IQS9151_EDGE_NONE;
+        /* Keep edge_inertia_zone latched while the fling runs; the work
+         * callback needs it to pick the wheel axis. It is reset on the next
+         * touchdown ("new touch interrupts" above). Only clear it here when
+         * no fling started, so a stale zone can't linger. */
+        if (!fling_started) {
+            data->edge_inertia_zone = IQS9151_EDGE_NONE;
+        }
     }
 #endif
 }
